@@ -5,6 +5,7 @@ edition = "2021"
 
 [dev-dependencies]
 bevy = "0.15.0"
+bevy_flycam = "0.15.0"
 
 [dependencies]
 atomicow = "1.0.0"

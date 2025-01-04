@@ -1,3 +1,4 @@
+use core::f32;
 use std::{
     hash::{DefaultHasher, Hash, Hasher},
     ops::Deref,
@@ -5,8 +6,13 @@ use std::{
 
 use atomicow::CowArc;
 use bevy::{
+    math::Vec3A,
     prelude::*,
-    render::{render_asset::RenderAssetUsages, render_resource::PrimitiveTopology},
+    render::{
+        mesh::MeshAabb, primitives::Aabb, render_asset::RenderAssetUsages,
+        render_resource::PrimitiveTopology,
+    },
+    tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task},
 };
 use meshtext::{MeshGenerator, TextSection};
 
@@ -14,12 +20,12 @@ pub struct MeshTextPlugin;
 
 impl Plugin for MeshTextPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(PostUpdate, update_meshes);
+        app.add_systems(PostUpdate, (update_meshes, attach_meshes).chain());
     }
 }
 /// This Inserts a Mesh3d onto the Entity with the component
 #[derive(Component, Clone, Debug, PartialEq, Deref, DerefMut)]
-#[require(MeshTextFont, MeshTextHash)]
+#[require(MeshTextFont, MeshTextHash, VerticalLayout, DepthLayout)]
 pub struct MeshText {
     #[deref]
     pub text: CowArc<'static, str>,
@@ -40,6 +46,8 @@ impl Hash for MeshText {
         state.write_u32(self.depth.to_bits());
     }
 }
+#[derive(Component)]
+struct ComputeMeshText(Task<(Mesh, Option<Aabb>)>);
 
 fn update_meshes(
     mut query: Query<(
@@ -47,13 +55,14 @@ fn update_meshes(
         &MeshText,
         &MeshTextFont,
         &VerticalLayout,
+        &DepthLayout,
         &mut MeshTextHash,
     )>,
-    mut meshes: ResMut<Assets<Mesh>>,
     fonts: Res<Assets<Font>>,
     mut cmds: Commands,
 ) {
-    for (entity, text, font, vertical_layout, mut hash) in query.iter_mut() {
+    let pool = AsyncComputeTaskPool::get();
+    for (entity, text, font, vertical_layout, depth_layout, mut hash) in query.iter_mut() {
         let mut hasher = DefaultHasher::new();
         text.hash(&mut hasher);
         font.hash(&mut hasher);
@@ -61,46 +70,90 @@ fn update_meshes(
         if hash.0 == text_hash {
             continue;
         }
-        let Some(font_data) = fonts.get(&font.0) else {
+        let Some(font_data) = fonts.get(&font.0).map(|data| data.data.deref().clone()) else {
             continue;
         };
+        let text = text.clone();
+        let vertical_layout = *vertical_layout;
+        let depth_layout = *depth_layout;
+        let task = pool.spawn(async move {
+            // annoying, i am not even keeping this
+            let mut generator = MeshGenerator::new(font_data);
+            let mut positions: Vec<[f32; 3]> = Vec::new();
+            let total_lines = text.lines().count();
+            for (line_index, line) in text.lines().enumerate() {
+                let text_mesh: meshtext::MeshText = generator
+                    .generate_section(line, text.depth == 0.0, None)
+                    .unwrap();
 
-        // annoying, i am not even keeping this
-        let mut generator = MeshGenerator::new(font_data.data.deref().clone());
-        let mut positions: Vec<[f32; 3]> = Vec::new();
-        let total_lines = text.lines().count();
-        for (line_index, line) in text.lines().enumerate() {
-            info!("line {line_index}");
-            let text_mesh: meshtext::MeshText = generator
-                .generate_section(line, text.depth == 0.0, None)
-                .unwrap();
-
-            let vertices = text_mesh.vertices;
-            let y_offset = get_y_offset(vertical_layout, text.height, total_lines, line_index);
-            positions.extend(vertices.chunks(3).map(|c| {
-                [
-                    c[0] * text.height,
-                    (c[1] * text.height) + y_offset,
-                    c[2] * text.depth,
-                ]
-            }));
-        }
-        let mut mesh = Mesh::new(
-            PrimitiveTopology::TriangleList,
-            RenderAssetUsages::RENDER_WORLD,
-        );
-        let uvs = vec![[0f32, 0f32]; positions.len()];
-        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-        mesh.compute_flat_normals();
-        let mesh = meshes.add(mesh);
-        cmds.entity(entity).insert(Mesh3d(mesh));
+                let vertices = text_mesh.vertices;
+                let width = vertices
+                    .chunks(3)
+                    .fold(f32::NEG_INFINITY, |v, p| v.max(p[0]));
+                let y_offset = get_y_offset(&vertical_layout, text.height, total_lines, line_index);
+                let z_offset = get_z_offset(&depth_layout, text.depth);
+                positions.extend(vertices.chunks(3).map(|c| {
+                    let vec = Vec3A::from_array([
+                        c[0] * text.height,
+                        (c[1] * text.height) + y_offset,
+                        (c[2] * text.depth) + z_offset,
+                    ]);
+                    let quat = Quat::from_rotation_y(f32::consts::PI);
+                    let vec = quat * vec;
+                    vec.to_array()
+                }));
+            }
+            let mut mesh = Mesh::new(
+                PrimitiveTopology::TriangleList,
+                RenderAssetUsages::RENDER_WORLD,
+            );
+            let uvs = vec![[0f32, 0f32]; positions.len()];
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+            mesh.compute_flat_normals();
+            let aabb = mesh.compute_aabb();
+            (mesh, aabb)
+        });
+        cmds.entity(entity).insert(ComputeMeshText(task));
         hash.0 = text_hash;
+    }
+}
+fn attach_meshes(
+    mut cmds: Commands,
+    mut mesh_tasks: Query<(Entity, &mut ComputeMeshText)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    for (entity, mut task) in &mut mesh_tasks {
+        if let Some((mesh, aabb)) = block_on(future::poll_once(&mut task.0)) {
+            let mesh = meshes.add(mesh);
+            cmds.entity(entity)
+                .insert(Mesh3d(mesh))
+                .remove::<ComputeMeshText>();
+            if let Some(aabb) = aabb {
+                cmds.entity(entity).insert(aabb);
+            }
+        }
+    }
+}
+/// Where should the origin be placed
+#[derive(Component, Clone, Debug, PartialEq, Default, Hash, Eq, Copy)]
+pub enum DepthLayout {
+    Centered,
+    #[default]
+    Front,
+    Back,
+}
+
+const fn get_z_offset(layout: &DepthLayout, depth: f32) -> f32 {
+    match layout {
+        DepthLayout::Centered => 0.0,
+        DepthLayout::Front => depth * 0.5,
+        DepthLayout::Back => -depth * 0.5,
     }
 }
 
 /// Where should the origin be placed
-#[derive(Component, Clone, Debug, PartialEq, Default, Hash, Eq)]
+#[derive(Component, Clone, Debug, PartialEq, Default, Hash, Eq, Copy)]
 pub enum VerticalLayout {
     #[default]
     Centered,
@@ -108,7 +161,7 @@ pub enum VerticalLayout {
     Bottom,
 }
 
-fn get_y_offset(
+const fn get_y_offset(
     layout: &VerticalLayout,
     line_height: f32,
     total_lines: usize,
@@ -117,14 +170,8 @@ fn get_y_offset(
     match layout {
         VerticalLayout::Centered => {
             let total = total_lines as f32 * line_height;
-
-            let fraction = match total_lines {
-                1 => 0.5,
-                _ => (current_line) as f32 / total_lines as f32,
-            };
-            let out = total * -fraction;
-            info!(total, fraction, out);
-            out
+            let top = (-line_height) * (current_line + 1) as f32;
+            top + (total * 0.5)
         }
         VerticalLayout::Top => (-line_height) * (current_line + 1) as f32,
         VerticalLayout::Bottom => line_height * current_line as f32,
