@@ -25,7 +25,13 @@ impl Plugin for MeshTextPlugin {
 }
 /// This Inserts a Mesh3d onto the Entity with the component
 #[derive(Component, Clone, Debug, PartialEq, Deref, DerefMut)]
-#[require(MeshTextFont, MeshTextHash, VerticalLayout, DepthLayout)]
+#[require(
+    MeshTextFont,
+    MeshTextHash,
+    VerticalLayout,
+    DepthLayout,
+    HorizontalLayout
+)]
 pub struct MeshText {
     #[deref]
     pub text: CowArc<'static, str>,
@@ -56,13 +62,16 @@ fn update_meshes(
         &MeshTextFont,
         &VerticalLayout,
         &DepthLayout,
+        &HorizontalLayout,
         &mut MeshTextHash,
     )>,
     fonts: Res<Assets<Font>>,
     mut cmds: Commands,
 ) {
     let pool = AsyncComputeTaskPool::get();
-    for (entity, text, font, vertical_layout, depth_layout, mut hash) in query.iter_mut() {
+    for (entity, text, font, vertical_layout, depth_layout, horizontal_layout, mut hash) in
+        query.iter_mut()
+    {
         let mut hasher = DefaultHasher::new();
         text.hash(&mut hasher);
         font.hash(&mut hasher);
@@ -76,6 +85,7 @@ fn update_meshes(
         let text = text.clone();
         let vertical_layout = *vertical_layout;
         let depth_layout = *depth_layout;
+        let horizontal_layout = *horizontal_layout;
         let task = pool.spawn(async move {
             // annoying, i am not even keeping this
             let mut generator = MeshGenerator::new(font_data);
@@ -89,12 +99,14 @@ fn update_meshes(
                 let vertices = text_mesh.vertices;
                 let width = vertices
                     .chunks(3)
-                    .fold(f32::NEG_INFINITY, |v, p| v.max(p[0]));
+                    .fold(f32::NEG_INFINITY, |v, p| v.max(p[0]))
+                    * text.height;
                 let y_offset = get_y_offset(&vertical_layout, text.height, total_lines, line_index);
                 let z_offset = get_z_offset(&depth_layout, text.depth);
+                let x_offset = get_x_offset(&horizontal_layout, width);
                 positions.extend(vertices.chunks(3).map(|c| {
                     let vec = Vec3A::from_array([
-                        c[0] * text.height,
+                        (c[0] * text.height) + x_offset,
                         (c[1] * text.height) + y_offset,
                         (c[2] * text.depth) + z_offset,
                     ]);
@@ -138,8 +150,8 @@ fn attach_meshes(
 /// Where should the origin be placed
 #[derive(Component, Clone, Debug, PartialEq, Default, Hash, Eq, Copy)]
 pub enum DepthLayout {
-    Centered,
     #[default]
+    Centered,
     Front,
     Back,
 }
@@ -147,17 +159,34 @@ pub enum DepthLayout {
 const fn get_z_offset(layout: &DepthLayout, depth: f32) -> f32 {
     match layout {
         DepthLayout::Centered => 0.0,
-        DepthLayout::Front => depth * 0.5,
-        DepthLayout::Back => -depth * 0.5,
+        DepthLayout::Front => -depth * 0.5,
+        DepthLayout::Back => depth * 0.5,
+    }
+}
+
+/// Where should the origin be placed
+#[derive(Component, Clone, Debug, PartialEq, Default, Hash, Eq, Copy)]
+pub enum HorizontalLayout {
+    Centered,
+    #[default]
+    Left,
+    Right,
+}
+
+const fn get_x_offset(layout: &HorizontalLayout, line_width: f32) -> f32 {
+    match layout {
+        HorizontalLayout::Centered => -line_width * 0.5,
+        HorizontalLayout::Left => 0.0,
+        HorizontalLayout::Right => -line_width,
     }
 }
 
 /// Where should the origin be placed
 #[derive(Component, Clone, Debug, PartialEq, Default, Hash, Eq, Copy)]
 pub enum VerticalLayout {
-    #[default]
     Centered,
     Top,
+    #[default]
     Bottom,
 }
 

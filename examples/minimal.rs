@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use bevy_mod_meshtext::{DepthLayout, MeshText, MeshTextPlugin, VerticalLayout};
+use bevy_mod_meshtext::{DepthLayout, HorizontalLayout, MeshText, MeshTextPlugin, VerticalLayout};
 fn main() -> AppExit {
     App::new()
         .add_plugins((
@@ -28,7 +28,8 @@ fn setup(mut cmds: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
             depth: 0.01,
         },
         VerticalLayout::Centered,
-        DepthLayout::Front,
+        DepthLayout::Back,
+        HorizontalLayout::Right,
         Transform::from_xyz(0.0, 2.0, 0.0),
     ));
     cmds.spawn((
@@ -40,6 +41,7 @@ fn setup(mut cmds: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
         },
         VerticalLayout::Centered,
         DepthLayout::Front,
+        HorizontalLayout::Centered
     ));
     cmds.spawn((
         MeshMaterial3d(text),
@@ -49,7 +51,6 @@ fn setup(mut cmds: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
             depth: 0.01,
         },
         VerticalLayout::Centered,
-        DepthLayout::Front,
         Transform::from_xyz(0.0, 0.0, -2.0),
     ));
     cmds.spawn((
