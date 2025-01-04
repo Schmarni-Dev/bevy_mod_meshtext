@@ -1,0 +1,15 @@
+[package]
+name = "bevy_mod_meshtext"
+version = "0.1.0"
+edition = "2021"
+
+[dev-dependencies]
+bevy = "0.15.0"
+
+[dependencies]
+atomicow = "1.0.0"
+bevy = { version = "0.15.0", default-features = false, features = [
+	"bevy_asset",
+	"bevy_text",
+] }
+meshtext = { version = "0.3.1", features = ["owned"] }
